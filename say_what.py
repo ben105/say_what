@@ -4,6 +4,8 @@ from optparse import OptionParser
 import requests
 import speech_recognition as sr
 import subprocess
+from sqlite3 import *
+import sys
 import thread
 import time
 
@@ -62,6 +64,21 @@ def translate(audio, r):
     return results
 
 
+def verify_sqltable_exists():
+    query = '''
+    SELECT name 
+    FROM sqlite_master 
+    WHERE type = 'table' AND name = 'recordings';
+    '''
+    try:
+        cur.execute(query)
+    except Exception as exc:
+        print('Failed trying to find table\n{}'.format(exc))
+        sys.exit(1)
+    rows = cur.fetchall()
+    if len(rows) == 0:
+       cur.execute('CREATE TABLE recordings (created_time datetime, varchar(900));')
+
 def write_to_db(results):
     try:
         cur.execute("INSERT INTO minutes VALUES (?, ?)",
@@ -69,8 +86,8 @@ def write_to_db(results):
         conn.commit()
     except Exception as exc:
         conn.rollback()
-        print('Failed to write new data, "{}", into database {}'.format(results, options.dbname))
-
+        print('Failed to write new data, "{}", into database {}\n{}'.format(results, options.dbname, exc))
+        sys.exit(1)
 
 def consumer(audio,r):
     # Received audio, now transcribe it and log it
@@ -84,14 +101,15 @@ def consumer(audio,r):
 def main():
     if options.ibm_user is None or options.ibm_pass is None:
         parser.print_usage()
+    verify_sqltable_exists()
     # Spawn index/notify/play-wav script subprocess
-    subprocess.Popen(['python','./say_my_name.py'])
+    subprocess.Popen(['python','./say_my_name.py', '-q', options.loglevel, '-d', options.dbname])
     r = sr.Recognizer()
     while True:
         with sr.Microphone() as source:
             print("Listening...")
             audio = r.listen(source)
-            thread.start_new_thread(consumer,(audio,r))
+            thread.start_new_thread(consumer, (audio,r))
 
 if __name__ == '__main__':
     main()

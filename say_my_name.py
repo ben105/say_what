@@ -1,84 +1,72 @@
 import json
-import requests
+import logging
+from optparse import OptionParser
 import subprocess
+from sqlite3 import *
+import thread
 import time
-
-requests.packages.urllib3.disable_warnings()
-
-SPLUNK_URL = 'https://localhost:8089'
-AUTH = requests.auth.HTTPBasicAuth('username', 'password')
 
 # Hipchat creds and my user id
 hipchat_url = "https://hipchat.company.com"
 hipchat_auth_token = ""
 hipchat_user_id = 1
 
-name = "josh"
+name = "ben"
 
-# Check for mentions within the last minute
-name_search = ("""search index=say_what sourcetype=_json """
-               """minutes=*{}* earliest=-1m@s""".format(name))
+parser = OptionParser()
+parser.add_option("-d", "--dbname", dest="dbname", default="say_what",
+                  help="name of the sqlite3 database", metavar="DBNAME")
+parser.add_option("-l", "--logpath", dest="logpath", default="/var/log/say_my_name.log",
+                  help="filepath to the log file", metavar="LOGPATH")
+parser.add_option("-q", "--loglevel", dest="loglevel", default="warning",
+                  help="level of logging", metavar="LOGLEVEL")
+options, args = parser.parse_args()
 
-# Get everything that was said in the last minute
-minutes_search = ("""search index=say_what sourcetype=_json """
-                  """minutes=* earliest=-1m@s| sort _time| fields minutes""")
+def get_level(level):
+  if not level:
+    return None
+  lowercase_level = level.lower()
+  if lowercase_level == "info":
+      return logging.info
+  if lowercase_level == "warning":
+      return logging.warning
+  if lowercase_level == "error":
+      return logging.error
+  if lowercase_level == "critical":
+      return logging.critical
+  if lowercase_level == "exception":
+      return logging.exception
+  if lowercase_level == "log":
+      return logging.log
+
+# Set up the connection to the database.
+conn = sqlite3.connect(options.dbname)
+cur = conn.cursor()
+
+# Set up the logging.
+FORMAT = '%(asctime)-15s %(levelname)s %(message)s'
+logging.basicConfig(format=FORMAT, filename=options.logpath, level=get_level(options.loglevel))
 
 
-def start_splunk_search(search_string):
+def recent_mention(search_string):
+    query = '''
+    SELECT
+        created_time, minutes
+    FROM
+        recordings
+    WHERE
+        created_time > ? and minutes ilike '%?%
+    ORDER BY
+        created_time DESC
+    LIMIT 1'
+    '''
+    seconds = time.time() - 60 # Look 1 minute back. 
+    date = datetime.datetime.fromtimestamp(int(seconds))
     try:
-        r = requests.post(
-            '%s/services/search/jobs' % SPLUNK_URL,
-            data={"search": search_string},
-            auth=AUTH,
-            verify=False,
-            params={'output_mode': 'json'})
-    except Exception as e:
-        print(e)
-
-    sid = r.json()['sid']
-    return sid
-
-
-def search_results(sid):
-    done = False
-    print "Searching Splunk"
-    while not done:
-        status = requests.get(
-            '%s/services/search/jobs/%s' % (SPLUNK_URL, sid),
-            auth=AUTH,
-            verify=False,
-            params={'output_mode': 'json'})
-
-        done = status.json()['entry'][0]['content']['isDone']
-        time.sleep(1)
-
-    result_count = int(status.json()['entry'][0]['content']['resultCount'])
-    return result_count
-
-
-def get_results(sid, result_count):
-    events = []
-    offset = 0
-
-    while result_count > len(events):
-        offset = len(events)
-        results = requests.get(
-            '%s/services/search/jobs/%s/results/' % (SPLUNK_URL, sid),
-            auth=AUTH,
-            verify=False,
-            params={'output_mode': 'json', 'count': 0, 'f': 'minutes', 'offset': offset})
-
-        more_events = [row['minutes'].encode('utf-8') for row in results.json()['results']]
-        events += more_events
-    return events
-
-
-def splunk_search(search_string):
-    search_id = start_splunk_search(search_string)
-    search_result_count = search_results(search_id)
-    events = get_results(search_id, search_result_count)
-    # print "Splunk returned {} events".format(search_result_count)
-    return events
+        cur.execute(query, (date.strftime('%Y-%m-%d %H:%M:%S') , search_string))
+    except Exception as exc:
+        logging.error('Failed to query for {}'.format(search_string))
+    return cur.fetchone()
 
 
 def notify(user_id, auth_token, message):
@@ -107,17 +95,20 @@ def muted():
 
 
 while True:
-    mentioned = splunk_search(name_search)
+    mentioned = recent_mention(name)
     if not mentioned:
-        time.sleep(1)
+        # It doesn't make sense to sleep for 1 second, and then search for a minute back.
+        # So instead we will sleep for 5 seconds, and then just to make sure that Watson
+        # had time to translate the voice recording, search 1 minute back.
+        time.sleep(5)
         continue
-    mention_time = time.time()
-    print("You were mentioned!")
-    minutes = "\n".join(splunk_search(minutes_search))
+    mention_time = mentioned[0]
+    logging.info("You were mentioned!")
+    minutes = mentioned[1]
     try:
-        notify(hipchat_user_id, hipchat_auth_token, minutes)
-    except Exception as e:
-        print(e)
+        thread.start_new_thread(notify, (hipchat_user_id, hipchat_auth_token, minutes))
+    except Exception as exc:
+        logging.error('Failed to start new thread\n{}'.format(exc))
 
     while int(time.time() - mention_time) < 15:
         time.sleep(1)
