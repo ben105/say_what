@@ -56,11 +56,10 @@ def translate(audio, r):
     try:
         results = r.recognize_ibm(audio, username=IBM_USERNAME, password=IBM_PASSWORD)
     except sr.UnknownValueError:
-        # print("IBM Speech to Text could not understand audio")
         pass
-    except sr.RequestError as e:
-        print("Could not request results from IBM Speech to Text service; {0}".format(e))
-    print("Results: {}".format(results))
+    except sr.RequestError as exc:
+        logging.error("Could not request results from IBM Speech to Text service\n{0}".format(exc))
+    logging.info("Results: {}".format(results))
     return results
 
 
@@ -73,7 +72,7 @@ def verify_sqltable_exists():
     try:
         cur.execute(query)
     except Exception as exc:
-        print('Failed trying to find table\n{}'.format(exc))
+        logging.info('Failed trying to find table\n{}'.format(exc))
         sys.exit(1)
     rows = cur.fetchall()
     if len(rows) == 0:
@@ -86,7 +85,7 @@ def write_to_db(results):
         conn.commit()
     except Exception as exc:
         conn.rollback()
-        print('Failed to write new data, "{}", into database {}\n{}'.format(results, options.dbname, exc))
+        logging.error('Failed to write new data, "{}", into database {}\n{}'.format(results, options.dbname, exc))
         sys.exit(1)
 
 def consumer(audio,r):
@@ -95,7 +94,7 @@ def consumer(audio,r):
     if results:
         write_to_db(results)
     else:
-        print "[--Silence--]"
+        logging.info("[--Silence--]")
 
 
 def main():
@@ -107,7 +106,7 @@ def main():
     r = sr.Recognizer()
     while True:
         with sr.Microphone() as source:
-            print("Listening...")
+            logging.info("Listening...")
             audio = r.listen(source)
             thread.start_new_thread(consumer, (audio,r))
 
