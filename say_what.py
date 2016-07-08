@@ -1,84 +1,89 @@
-import speech_recognition as sr
-import time
 import json
+import logging
+from optparse import OptionParser
 import requests
-import thread
+import speech_recognition as sr
 import subprocess
+import thread
+import time
 
-SPLUNK_URL = "https://localhost"
-# Splunk http event collector token
-hec_token = ""
+parser = OptionParser()
+parser.add_option("-d", "--dbname", dest="dbname", default="say_what",
+                  help="name of the sqlite3 database", metavar="DBNAME")
+parser.add_option("-u", "--user", dest="ibm_user",
+                  help="IBM speech to text user name", metavar="IBM_USERNAME")
+parser.add_option("-p", "--password", dest="ibm_pass",
+                  help="IBM speech to text password", metavar="IBM PASSWORD")
+parser.add_option("-l", "--logpath", dest="logpath", default="/var/log/say_what.log",
+                  help="filepath to the log file", metavar="LOGPATH")
+parser.add_option("-q", "--loglevel", dest="loglevel", default="warning",
+                  help="level of logging", metavar="LOGLEVEL")
+options, args = parser.parse_args()
+
+def get_level(level):
+  if not level:
+    return None
+  lowercase_level = level.lower()
+  if lowercase_level == "info":
+      return logging.info
+  if lowercase_level == "warning":
+      return logging.warning
+  if lowercase_level == "error":
+      return logging.error
+  if lowercase_level == "critical":
+      return logging.critical
+  if lowercase_level == "exception":
+      return logging.exception
+  if lowercase_level == "log":
+      return logging.log
+
+# Set up the connection to the database.
+conn = sqlite3.connect(options.dbname)
+cur = conn.cursor()
+
+# Set up the logging.
+FORMAT = '%(asctime)-15s %(levelname)s %(message)s'
+logging.basicConfig(format=FORMAT, filename=options.logpath, level=get_level(options.loglevel))
 
 # IBM Speech to Text creds
 IBM_USERNAME = ""
 IBM_PASSWORD = ""
 
-def translate(audio,r):
-    # The translated output from IBM's Watson speech-to-text api
-    # The r param is an instance of SpeechRecognition
-    # Returns a dict because I plan on trying other speech-to-text tools
-
-    results = {}
-    text = False
+def translate(audio, r):
+    results = None
     try:
-        text = r.recognize_ibm(audio, username=IBM_USERNAME, password=IBM_PASSWORD)
-        print("Results:" + text)
+        results = r.recognize_ibm(audio, username=IBM_USERNAME, password=IBM_PASSWORD)
     except sr.UnknownValueError:
         # print("IBM Speech to Text could not understand audio")
         pass
     except sr.RequestError as e:
         print("Could not request results from IBM Speech to Text service; {0}".format(e))
-
-    if text:
-        results['text'] = text
-
+    print("Results: {}".format(results))
     return results
 
 
-def create_event(results):
-    event = {
-        "time": str(time.time()),
-        "host": "localhost",
-        "source": "say_what",
-        "sourcetype": "_json",
-        "index": "say_what",
-        "event": {
-            "minutes": results['text'],
-        }
-    }
-    return event
-
-
-def send_to_splunk(event):
-    event_json = json.dumps(event)
-    # Ignore ssl cert warning
-    # requests.packages.urllib3.disable_warnings()
-    try :
-        r = requests.post("%s:8088/services/collector/event" % SPLUNK_URL,
-            headers={"Authorization": "Splunk %s" % hec_token},
-            data=event_json,
-            verify=False)
-        # print r.status_code
-    except Exception, e:
-        print e
+def write_to_db(results):
+    try:
+        cur.execute("INSERT INTO minutes VALUES (?, ?)",
+                (time.time(), results))
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        print('Failed to write new data, "{}", into database {}'.format(results, options.dbname))
 
 
 def consumer(audio,r):
-    # Received audio, now transcribe it and send to Splunk
+    # Received audio, now transcribe it and log it
     results = translate(audio,r)
-    if 'text' in results:
-        event = create_event(results)
-        send_to_splunk(event)
+    if results:
+        write_to_db(results)
     else:
         print "[--Silence--]"
 
-    # Save audio to an AIFF file (UNFINISHED: Slow, blocking)
-    # now = str(time.time())
-    # with open("./audio/{}.aiff".format(now), "wb") as f:
-    #     f.write(audio.get_aiff_data())
-
 
 def main():
+    if options.ibm_user is None or options.ibm_pass is None:
+        parser.print_usage()
     # Spawn index/notify/play-wav script subprocess
     subprocess.Popen(['python','./say_my_name.py'])
     r = sr.Recognizer()
